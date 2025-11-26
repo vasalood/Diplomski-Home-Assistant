@@ -1,0 +1,98 @@
+services:
+  mongo:
+    image: mongo:8.0
+    container_name: mongo-home-assistant
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongoadmin
+      MONGO_INITDB_ROOT_PASSWORD: Vasamare123
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto-home-assistant
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./MqttBroker/Mosquitto/data:/mosquitto/data
+      - ./MqttBroker/Mosquitto/logs:/mosquitto/logs
+      - ./MqttBroker/Mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+  
+  nats:
+    image: nats:latest
+    container_name: nats-home-assistant
+    restart: unless-stopped
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+  
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-home-assistant
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - mongo
+
+  ekuiper:
+    image: lfedge/ekuiper:latest
+    container_name: ekuiper-home-assistant
+    restart: unless-stopped
+    environment:
+      - MQTT_SOURCE__DEFAULT__SERVER=tcp://mosquitto:1883
+    volumes:
+      - ekuiper-data:/kuiper
+    ports:
+      - "9081:9081"
+    depends_on:
+      - mosquitto
+
+  # sensor-gateway-service:
+  #   build:
+  #     context: ./SensorGatewayService
+  #     dockerfile: Dockerfile
+  #   container_name: sensor-gateway-service
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - mosquitto
+  #     - nats
+
+  # storage-service:
+  #   build:
+  #     context: ./StorageService
+  #     dockerfile: Dockerfile
+  #   container_name: storage-service
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - nats
+  #     - mongo
+  #   ports:
+  #     - "4000:4000"
+
+  # command-service:
+  #   build:
+  #     context: ./CommandService
+  #     dockerfile: Dockerfile
+  #   container_name: command-service
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - mosquitto
+  #   ports:
+  #     - "5000:8080"
+
+volumes:
+  mongo-data:
+  grafana-data:
+  ekuiper-data:
