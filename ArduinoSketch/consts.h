@@ -1,0 +1,28 @@
+const char MQTT_TOPIC_DATA[] = "home/house_1/sensor/data";
+const char MQTT_TOPIC_EVENTS[] = "home/house_1/security/events";
+const char MQTT_TOPIC_COMMANDS[] = "home/house_1/commands";
+const char SENSOR_NAME[] = "MKR1010_WiFi";
+
+enum AlarmState {
+  ARMED,
+  AUTH_COUNTDOWN,
+  INTRUDER,
+  NORMAL
+};
+
+enum EnvPage {
+  PAGE_TEMP = 0,
+  PAGE_HUM = 1,
+  PAGE_PRESSURE = 2
+};
+
+const float GYRO_THRESHOLD = 50.0f;
+
+const uint8_t PIN_LENGTH = 4;
+const uint8_t CORRECT_PIN[PIN_LENGTH] = {0, 1, 2, 3};
+
+const uint8_t MAX_FAILED_ATTEMPTS = 3;
+
+const unsigned long ENV_SAMPLE_INTERVAL = 5000UL;
+
+const uint8_t AUTH_WINDOW_SECONDS = 30;

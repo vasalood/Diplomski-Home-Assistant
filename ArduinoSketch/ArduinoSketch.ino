@@ -1,82 +1,70 @@
 #include <Arduino_MKRIoTCarrier.h>
 #include <ArduinoMqttClient.h>
-#include <WiFiNINA.h>
 #include <ArduinoJson.h>
+#include <WiFiNINA.h>
 #include <math.h>
 #include "visuals.h"
 #include "pitches.h"
 #include "secrets.h"
-
-enum AlarmState {
-  ARMED,
-  AUTH_COUNTDOWN,
-  INTRUDER,
-  NORMAL
-};
+#include "consts.h"
 
 MKRIoTCarrier carrier;
 WiFiClient wifiClient;
 MqttClient mqttClient(wifiClient);
+
 AlarmState alarmState = ARMED;
+EnvPage currentPage = PAGE_TEMP;
 
-// IMU
+unsigned long lastEnvSampleTime = 0;
+bool normalStateJustEntered = false;
+
 float Gx, Gy, Gz;
-const float GYRO_THRESHOLD = 50.0;
 
-// Auth countdown
-const int AUTH_WINDOW_SECONDS = 30;
 unsigned long authStartTime = 0;
 int lastDisplayedSeconds = -1;
 unsigned long lastBeepTime = 0;
 
-// PIN logika (4 cifre, 1–5 = touch dugmići)
-const int PIN_LENGTH = 4;
-const int CORRECT_PIN[PIN_LENGTH] = {1, 2, 3, 4};
+uint8_t enteredPin[PIN_LENGTH];
+uint8_t enteredLength = 0;
 
-int enteredPin[PIN_LENGTH];
-int enteredLength = 0;
+uint8_t failedAttempts = 0;
 
-// BROJ POGREŠNIH POKUŠAJA
-const int MAX_FAILED_ATTEMPTS = 3;
-int failedAttempts = 0;
+uint32_t colorRed, colorGreen, colorBlue, colorBlack;
 
-// Boje za LED
-uint32_t colorRed   = 0;
-uint32_t colorGreen = 0;
-uint32_t colorBlue  = 0;
-uint32_t colorBlack = 0;
+// --- melodije ---
 
-// ------------------------ Melodije ------------------------
-
-// success melodija (kad PIN uspe)
-int successMelody[] = {
+const uint16_t successMelody[] = {
   NOTE_E6, NOTE_G6, NOTE_C7, NOTE_G6
 };
-int successDurations[] = {
+
+const uint8_t successDurations[] = {
   8, 8, 8, 8
 };
-const int SUCCESS_MELODY_LEN = sizeof(successMelody) / sizeof(successMelody[0]);
 
-// error melodija (pogrešan PIN)
-int errorMelody[] = {
+const uint8_t SUCCESS_MELODY_LEN = sizeof(successMelody) / sizeof(successMelody[0]);
+
+const uint16_t errorMelody[] = {
   NOTE_G5, NOTE_E5
 };
-int errorDurations[] = {
+
+const uint8_t errorDurations[] = {
   4, 4
 };
-const int ERROR_MELODY_LEN = sizeof(errorMelody) / sizeof(errorMelody[0]);
 
-// helper za puštanje melodija
-void playMelody(const int *melody, const int *durations, int length) {
-  for (int i = 0; i < length; i++) {
-    int noteDuration = 1000 / durations[i];
+const uint8_t ERROR_MELODY_LEN = sizeof(errorMelody) / sizeof(errorMelody[0]);
+
+// ------------------------ Audio helperi ------------------------
+
+void playMelody(const uint16_t *melody, const uint8_t *durations, uint8_t length) {
+  for (uint8_t i = 0; i < length; i++) {
+    uint16_t noteDuration = 1000 / durations[i];
 
     if (melody[i] != 0) {
       carrier.Buzzer.sound(melody[i]);
     }
     delay(noteDuration);
 
-    int pauseBetweenNotes = noteDuration * 0.30;
+    uint16_t pauseBetweenNotes = noteDuration * 0.30f;
     delay(pauseBetweenNotes);
 
     carrier.Buzzer.noSound();
@@ -85,15 +73,15 @@ void playMelody(const int *melody, const int *durations, int length) {
 
 // kratak beep za odbrojavanje
 void playShortCountdownBeep() {
-  int noteDuration = 1000 / 16;   // šesnaestinka
+  uint16_t noteDuration = 1000 / 16;   // šesnaestinka
   carrier.Buzzer.sound(NOTE_A6);
   delay(noteDuration);
-  int pauseBetweenNotes = noteDuration * 0.30;
+  uint16_t pauseBetweenNotes = noteDuration * 0.30f;
   delay(pauseBetweenNotes);
   carrier.Buzzer.noSound();
 }
 
-// ------------------------ Helperi ------------------------
+// ------------------------ Helperi za IMU / stanja ------------------------
 
 bool detectMovement() {
   carrier.IMUmodule.readGyroscope(Gx, Gy, Gz);
@@ -123,7 +111,7 @@ void drawArmedScreen() {
   carrier.display.setCursor(60, 90);
   carrier.display.print("ARMED");
 
-  // NEMA više plavih LED – ARMED = mrak
+  // ARMED = mrak na LED
   carrier.leds.fill(colorBlack, 0, 5);
   carrier.leds.show();
 }
@@ -136,7 +124,7 @@ void drawNormalScreen() {
   carrier.display.print("NORMAL");
 
   // 3 puta zablinka zeleno pa se ugasi
-  for (int i = 0; i < 3; i++) {
+  for (uint8_t i = 0; i < 3; i++) {
     carrier.leds.fill(colorGreen, 0, 5);
     carrier.leds.show();
     delay(250);
@@ -151,30 +139,30 @@ void drawIntruderScreen() {
   carrier.display.setTextColor(ST77XX_RED);
   carrier.display.setTextSize(3);
   carrier.display.setCursor(30, 90);
-  carrier.display.print("INTRUDER!");
+  carrier.display.print("INTRUDER");
+  carrier.display.setCursor(30, 130);
+  carrier.display.print("DETECTED!");
 }
 
-// pozovi kad prelazimo iz ARMED u AUTH_COUNTDOWN
 void startAuthCountdown() {
   alarmState = AUTH_COUNTDOWN;
   authStartTime = millis();
   lastDisplayedSeconds = -1;
   lastBeepTime = 0;
   enteredLength = 0;
-  failedAttempts = 0;   // RESETujemo broj grešaka na početku novog countdowna
+  failedAttempts = 0;
 
   Serial.println("Prelaz u AUTH_COUNTDOWN");
 
-  // LED stalno crvena tokom countdown-a
   carrier.leds.fill(colorRed, 0, 5);
   carrier.leds.show();
 
   carrier.display.fillScreen(ST77XX_BLACK);
 }
 
-// dodavanje cifre u PIN
-void addDigit(int d) {
-  // ako je već uneo 4 cifre, ignorišemo dok se ne resetuje
+// ------------------------ PIN logika ------------------------
+
+void addDigit(uint8_t d) {
   if (enteredLength >= PIN_LENGTH) return;
 
   enteredPin[enteredLength] = d;
@@ -186,11 +174,12 @@ void addDigit(int d) {
   Serial.print(enteredLength);
   Serial.println(")");
 
-  // OVDE NAMERNO NE PROVERAVAMO PIN dok ne bude svih 4 cifre
-
   if (enteredLength == PIN_LENGTH) {
+    // da bi korisnik video i četvrtu zvezdicu
+    delay(750);
+
     bool ok = true;
-    for (int i = 0; i < PIN_LENGTH; i++) {
+    for (uint8_t i = 0; i < PIN_LENGTH; i++) {
       if (enteredPin[i] != CORRECT_PIN[i]) {
         ok = false;
         break;
@@ -200,6 +189,7 @@ void addDigit(int d) {
     if (ok) {
       Serial.println("PIN tacan -> NORMAL stanje");
       alarmState = NORMAL;
+      normalStateJustEntered = true;
       carrier.Buzzer.noSound();
       playMelody(successMelody, successDurations, SUCCESS_MELODY_LEN);
       drawNormalScreen();
@@ -207,96 +197,85 @@ void addDigit(int d) {
       Serial.println("PIN pogresan!");
       failedAttempts++;
 
-      // kratka error melodija
       playMelody(errorMelody, errorDurations, ERROR_MELODY_LEN);
 
       if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
         Serial.println("Previse pogresnih pokusaja -> INTRUDER!");
         alarmState = INTRUDER;
         drawIntruderScreen();
-        // dalje sirena ide u updateIntruderAlarm()
       }
 
-      // u svakom slucaju, reset uvecanog PIN-a
       enteredLength = 0;
     }
   }
 }
 
-// glavna logika za AUTH_COUNTDOWN
 void updateAuthCountdown() {
   unsigned long now = millis();
 
-  // izračunaj preostalo vreme
   int elapsedSeconds = (now - authStartTime) / 1000;
   int remaining = AUTH_WINDOW_SECONDS - elapsedSeconds;
 
-  // Ako je vec preslo u INTRUDER zbog 3 greske, ne radimo vise nista ovde
   if (alarmState == INTRUDER) {
     return;
   }
 
   if (remaining <= 0 && alarmState == AUTH_COUNTDOWN) {
-    // vreme isteklo, nema dobre šifre -> INTRUDER
     alarmState = INTRUDER;
     Serial.println("Isteklo vreme -> INTRUDER");
     drawIntruderScreen();
     return;
   }
 
-  // beep na svake ~1s
   if (now - lastBeepTime >= 1000) {
     lastBeepTime = now;
     playShortCountdownBeep();
   }
 
-  // osveži prikaz samo kad se promeni sekunda
   if (remaining != lastDisplayedSeconds) {
     lastDisplayedSeconds = remaining;
 
     carrier.display.fillScreen(ST77XX_BLACK);
-
-    // countdown broj
     carrier.display.setTextColor(ST77XX_WHITE);
+
     carrier.display.setTextSize(4);
     carrier.display.setCursor(100, 60);
     carrier.display.print(remaining);
 
-    // prikaz PIN-a (zvezdice)
-    carrier.display.setTextSize(2);
-    carrier.display.setCursor(50, 140);
+    carrier.display.setTextSize(3);
+    carrier.display.setCursor(15, 130);
     carrier.display.print("PIN: ");
-    for (int i = 0; i < enteredLength; i++) {
+    for (uint8_t i = 0; i < enteredLength; i++) {
       carrier.display.print('*');
     }
+
+    carrier.display.setTextSize(2);
+    carrier.display.setCursor(15, 160);
+    carrier.display.print("Attempts left: ");
+    carrier.display.print(MAX_FAILED_ATTEMPTS - failedAttempts);
   }
 
-  // čitanje touch dugmića za unos PIN-a
   carrier.Buttons.update();
 
   if (carrier.Buttons.onTouchDown(TOUCH0)) {
+    addDigit(0);
+  }
+  else if (carrier.Buttons.onTouchDown(TOUCH1)) {
     addDigit(1);
-    delay(200);
   }
-  if (carrier.Buttons.onTouchDown(TOUCH1)) {
+  else if (carrier.Buttons.onTouchDown(TOUCH2)) {
     addDigit(2);
-    delay(200);
   }
-  if (carrier.Buttons.onTouchDown(TOUCH2)) {
+  else if (carrier.Buttons.onTouchDown(TOUCH3)) {
     addDigit(3);
-    delay(200);
   }
-  if (carrier.Buttons.onTouchDown(TOUCH3)) {
+  else if (carrier.Buttons.onTouchDown(TOUCH4)) {
     addDigit(4);
-    delay(200);
-  }
-  if (carrier.Buttons.onTouchDown(TOUCH4)) {
-    addDigit(5);
-    delay(200);
   }
 }
 
-// jednostavan "panic" alarm za INTRUDER stanje
+// ------------------------ INTRUDER alarm ------------------------
+
 void updateIntruderAlarm() {
   static bool ledsOn = false;
   static unsigned long lastToggle = 0;
@@ -318,7 +297,225 @@ void updateIntruderAlarm() {
   }
 }
 
-// ------------------------ setup & loop ------------------------
+// ------------------------ ENV ekran: static deo + value deo ------------------------
+
+// TEMP
+
+void drawTemperatureStatic() {
+  carrier.display.fillScreen(ST77XX_BLACK);
+  carrier.display.setTextSize(3);
+  carrier.display.setTextColor(ST77XX_WHITE);
+  carrier.display.setCursor(25, 60);
+  carrier.display.print("Temperature");
+
+  carrier.display.drawBitmap(80, 80, temperature_logo, 100, 100, 0xDAC9);
+}
+
+void drawTemperatureValue(int16_t tempInt) {
+  // obriši samo donji deo
+  carrier.display.fillRect(40, 170, 200, 60, ST77XX_BLACK);
+
+  carrier.display.setTextSize(3);
+  carrier.display.setTextColor(ST77XX_WHITE);
+  carrier.display.setCursor(60, 180);
+  carrier.display.print(tempInt);
+  carrier.display.print(" C");
+}
+
+// HUMIDITY
+
+void drawHumidityStatic() {
+  carrier.display.fillScreen(ST77XX_BLACK);
+  carrier.display.setTextSize(3);
+  carrier.display.setTextColor(ST77XX_WHITE);
+  carrier.display.setCursor(54, 40);
+  carrier.display.print("Humidity");
+
+  carrier.display.drawBitmap(70, 70, humidity_logo, 100, 100, 0x0D14);
+}
+
+void drawHumidityValue(int16_t humInt) {
+  carrier.display.fillRect(40, 170, 200, 60, ST77XX_BLACK);
+
+  carrier.display.setTextSize(3);
+  carrier.display.setTextColor(ST77XX_WHITE);
+  carrier.display.setCursor(60, 180);
+  carrier.display.print(humInt);
+  carrier.display.print(" %");
+}
+
+// PRESSURE
+
+void drawPressureStatic() {
+  carrier.display.fillScreen(ST77XX_BLACK);
+  carrier.display.setTextSize(3);
+  carrier.display.setTextColor(ST77XX_WHITE);
+  carrier.display.setCursor(54, 40);
+  carrier.display.print("Pressure");
+
+  carrier.display.drawBitmap(70, 60, pressure_logo, 100, 100, 0xF621);
+}
+
+void drawPressureValue(int16_t pressInt) {
+  carrier.display.fillRect(20, 150, 210, 60, ST77XX_BLACK);
+
+  carrier.display.setTextSize(3);
+  carrier.display.setTextColor(ST77XX_WHITE);
+  carrier.display.setCursor(40, 160);
+  carrier.display.print(pressInt);
+  carrier.display.setCursor(150, 160);
+  carrier.display.print("kPa");
+}
+
+// helperi za izbor stranice
+
+void drawEnvStaticPage(EnvPage page) {
+  switch (page) {
+    case PAGE_TEMP:
+      drawTemperatureStatic();
+      break;
+    case PAGE_HUM:
+      drawHumidityStatic();
+      break;
+    case PAGE_PRESSURE:
+      drawPressureStatic();
+      break;
+  }
+}
+
+void drawEnvValue(EnvPage page, int16_t tempInt, int16_t humInt, int16_t pressInt) {
+  switch (page) {
+    case PAGE_TEMP:
+      drawTemperatureValue(tempInt);
+      break;
+    case PAGE_HUM:
+      drawHumidityValue(humInt);
+      break;
+    case PAGE_PRESSURE:
+      drawPressureValue(pressInt);
+      break;
+  }
+}
+
+// ------------------------ Logovanje ENV u JSON ------------------------
+
+void logEnvToSerial(float temperature, float humidity, float pressure) {
+  StaticJsonDocument<256> doc;
+
+  doc["state"] = "NORMAL";
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
+  doc["pressure"] = pressure;
+  doc["millis"] = millis();  // opcionalno, vreme rada
+
+  serializeJson(doc, Serial);
+  Serial.println(); // novi red
+}
+
+// ------------------------ NORMAL stanje: merenje + gestovi ------------------------
+
+void handleNormalState() {
+
+  static float lastTemp, lastHum, lastPress;
+  static int16_t tempInt, humInt, pressInt;
+
+  unsigned long now = millis();
+
+  // prvi ulazak u NORMAL – očitaj senzore i prikaži temperaturu
+  if (normalStateJustEntered) {
+    currentPage = PAGE_TEMP; // kreni od Temperature
+
+    lastTemp  = carrier.Env.readTemperature();
+    lastHum   = carrier.Env.readHumidity();
+    lastPress = carrier.Pressure.readPressure();
+
+    // float za log, int za prikaz
+    tempInt  = (int16_t)roundf(lastTemp);
+    humInt   = (int16_t)roundf(lastHum);
+    pressInt = (int16_t)roundf(lastPress);
+
+    logEnvToSerial(lastTemp, lastHum, lastPress);
+
+    drawEnvStaticPage(currentPage);
+    drawEnvValue(currentPage, tempInt, humInt, pressInt);
+
+    lastEnvSampleTime = now;
+    normalStateJustEntered = false;
+  }
+
+  // periodično očitavanje svakih ENV_SAMPLE_INTERVAL ms
+  if (now - lastEnvSampleTime >= ENV_SAMPLE_INTERVAL) {
+    lastEnvSampleTime = now;
+
+    lastTemp  = carrier.Env.readTemperature();
+    lastHum   = carrier.Env.readHumidity();
+    lastPress = carrier.Pressure.readPressure();
+
+    logEnvToSerial(lastTemp, lastHum, lastPress);
+
+    int16_t newTempInt  = (int16_t)roundf(lastTemp);
+    int16_t newHumInt   = (int16_t)roundf(lastHum);
+    int16_t newPressInt = (int16_t)roundf(lastPress);
+
+    bool needRedrawValue = false;
+
+    if (newTempInt != tempInt) {
+      tempInt = newTempInt;
+      if (currentPage == PAGE_TEMP) needRedrawValue = true;
+    }
+    if (newHumInt != humInt) {
+      humInt = newHumInt;
+      if (currentPage == PAGE_HUM) needRedrawValue = true;
+    }
+    if (newPressInt != pressInt) {
+      pressInt = newPressInt;
+      if (currentPage == PAGE_PRESSURE) needRedrawValue = true;
+    }
+
+    // ako se promenio int na trenutno prikazanoj stranici, update samo broja
+    if (needRedrawValue) {
+      drawEnvValue(currentPage, tempInt, humInt, pressInt);
+    }
+  }
+
+  // čitanje gestova LEFT/RIGHT za promenu stranice
+  if (carrier.Light.gestureAvailable()) {
+    uint8_t gesture = carrier.Light.readGesture();
+
+    if (gesture == LEFT) {
+      // TEMP <- HUM <- PRESS <- TEMP ...
+      if (currentPage == PAGE_TEMP) {
+        currentPage = PAGE_PRESSURE;
+      } else {
+        currentPage = (EnvPage)((uint8_t)currentPage - 1);
+      }
+      drawEnvStaticPage(currentPage);
+      drawEnvValue(currentPage, tempInt, humInt, pressInt);
+    }
+    else if (gesture == RIGHT) {
+      // TEMP -> HUM -> PRESS -> TEMP ...
+      if (currentPage == PAGE_PRESSURE) {
+        currentPage = PAGE_TEMP;
+      } else {
+        currentPage = (EnvPage)((uint8_t)currentPage + 1);
+      }
+      drawEnvStaticPage(currentPage);
+      drawEnvValue(currentPage, tempInt, humInt, pressInt);
+    }
+    else if (gesture == DOWN) {
+      Serial.println("Gesture DOWN -> ARMED");
+      alarmState = ARMED;
+      drawArmedScreen();
+      // pošto smo promenili stanje, nema više posla u NORMAL u ovoj iteraciji
+      return;
+    }
+  }
+
+  // mali delay da ne cepa CPU
+  delay(50);
+}
+
+// ------------------------ setup / loop ------------------------
 
 void setup() {
   Serial.begin(9600);
@@ -329,17 +526,17 @@ void setup() {
     while (1);
   }
 
+  CARRIER_CASE = false;
+
+  carrier.display.setRotation(0);
+
   colorRed   = carrier.leds.Color(255, 0, 0);
   colorGreen = carrier.leds.Color(0, 255, 0);
   colorBlue  = carrier.leds.Color(0, 0, 255);
   colorBlack = carrier.leds.Color(0, 0, 0);
 
-  CARRIER_CASE = false;    // ako ga ubaciš u kutiju, stavi true
-
-  carrier.display.setRotation(0);
   delay(1000);
 
-  // WiFi
   Serial.print("Povezivanje na WiFi: ");
   Serial.println(WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -352,7 +549,6 @@ void setup() {
   Serial.print("IP adresa: ");
   Serial.println(WiFi.localIP());
 
-  // MQTT
   Serial.print("Povezivanje na MQTT broker: ");
   Serial.print(MQTT_BROKER);
   Serial.print(":");
@@ -366,18 +562,15 @@ void setup() {
   Serial.println("MQTT povezan!");
   mqttClient.setId(SENSOR_NAME);
 
-  // start u ARMED stanju
   drawArmedScreen();
 }
 
 void loop() {
   switch (alarmState) {
     case ARMED:
-      // samo gledamo IMU – ako ima pomeranja, kreće countdown
       if (detectMovement()) {
         startAuthCountdown();
       }
-      delay(100); // mali delay da ne spamujemo
       break;
 
     case AUTH_COUNTDOWN:
@@ -385,8 +578,7 @@ void loop() {
       break;
 
     case NORMAL:
-      // za sada ništa posebno, samo stoji u NORMAL
-      delay(200);
+      handleNormalState();
       break;
 
     case INTRUDER:
