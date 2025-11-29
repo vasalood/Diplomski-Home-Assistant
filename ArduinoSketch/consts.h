@@ -31,7 +31,7 @@ const char USER_IDS[USER_COUNT][10] = {
 const uint8_t USER_PINS[USER_COUNT][PIN_LENGTH] = {
   {0, 1, 2, 3},
   {0, 2, 0, 2},
-  {4, 3, 2, 1}
+  {1, 1, 1, 1}
 };
 
 const uint8_t MAX_FAILED_ATTEMPTS = 3;
